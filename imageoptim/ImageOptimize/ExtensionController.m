@@ -28,6 +28,14 @@
     @try {
         [super loadView];
 
+        if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){26, 0, 0}] &&
+            [self.view isKindOfClass:[NSVisualEffectView class]]) {
+            NSVisualEffectView *effect = (NSVisualEffectView *)self.view;
+            // The nib forces vibrantLight, which ignores Dark Mode and the system material.
+            effect.appearance = nil;
+            effect.material = NSVisualEffectMaterialContentBackground;
+        }
+
         NSExtensionItem *inputItem = self.extensionContext.inputItems.firstObject;
         NSItemProvider *provider = inputItem.attachments.firstObject;
         NSLog(@"Got %d input items with %d attachments", (int)self.extensionContext.inputItems.count, (int)inputItem.attachments.count);
