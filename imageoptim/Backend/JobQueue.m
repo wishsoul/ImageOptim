@@ -2,6 +2,8 @@
 #import "JobQueue.h"
 #import "Job.h"
 #import "DirScanner.h"
+#import "ProcessorBudget.h"
+#import "log.h"
 
 @interface JobQueue ()
 @property (strong) NSUserDefaults *defaults;
@@ -23,12 +25,17 @@
     if (self) {
         self.defaults = defaults;
         BOOL lowPriority = [defaults boolForKey:@"RunLowPriority"];
+        if (cpus <= 0) {
+            cpus = [ProcessorBudget recommendedFileConcurrencyForLowPriority:lowPriority];
+        }
 
         serialQueue = dispatch_queue_create("serial", DISPATCH_QUEUE_SERIAL);
 
         cpuQueue = [NSOperationQueue new];
         cpuQueue.name = @"cpuQueue";
-        cpuQueue.maxConcurrentOperationCount = cpus ? cpus : NSOperationQueueDefaultMaxConcurrentOperationCount;
+        cpuQueue.maxConcurrentOperationCount = cpus;
+        [[ProcessorBudget sharedBudget] attachCPUQueue:cpuQueue defaults:defaults];
+        IODebug("CPU queue width %ld on %ld cores", (long)cpus, (long)[[ProcessorBudget sharedBudget] heavyCoreBudget]);
 
         dirWorkerQueue = [NSOperationQueue new];
         dirWorkerQueue.name = @"dirWorkerQueue";
