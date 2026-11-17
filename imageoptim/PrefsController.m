@@ -63,6 +63,16 @@ static const char *kStripAllContext = "strip";
     [alert beginSheetModalForWindow:[self window] completionHandler:nil];
 }
 
+- (void)windowDidLoad {
+    [super windowDidLoad];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+    if (@available(macOS 26.0, *)) {
+        // This window is a dense grid sized for the control metrics used before macOS 26.
+        self.window.contentView.prefersCompactControlSizeMetrics = YES;
+    }
+#endif
+}
+
 - (IBAction)showLossySettings:(id)sender {
     [self showWindow:sender];
     [self.tabs selectTabViewItemAtIndex:1];

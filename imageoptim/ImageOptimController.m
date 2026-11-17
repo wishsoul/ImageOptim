@@ -12,6 +12,15 @@
 #include <mach/host_info.h>
 #import <Quartz/Quartz.h>
 
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+@interface ImageOptimController () <NSToolbarDelegate>
+@end
+#endif
+
+static BOOL IOIsMacOS26(void) {
+    return [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){26, 0, 0}];
+}
+
 @implementation ImageOptimController
 
 extern int quitWhenDone;
@@ -44,6 +53,7 @@ static const char *kIMPreviewPanelContext = "preview";
     [userDefaults registerDefaults:defs];
 
     [self initStatusbarWithDefaults:userDefaults];
+    [self adoptLiquidGlassIfNeeded];
 
     IOSharedPrefsCopy(userDefaults);
 
@@ -101,7 +111,9 @@ static void appendFormatNameIfLossyEnabled(NSUserDefaults *defs, NSString *name,
 }
 
 - (void)initStatusbarWithDefaults:(NSUserDefaults *)defs {
-    [[statusBarLabel cell] setBackgroundStyle:NSBackgroundStyleRaised];
+    // Raised drawing was for the textured bottom bar. On Liquid Glass the label sits on the window background.
+    NSBackgroundStyle backgroundStyle = IOIsMacOS26() ? NSBackgroundStyleNormal : NSBackgroundStyleRaised;
+    [[statusBarLabel cell] setBackgroundStyle:backgroundStyle];
 
     static BOOL overallAvg = NO;
     static NSString *defaultText;
@@ -203,6 +215,7 @@ static void appendFormatNameIfLossyEnabled(NSUserDefaults *defs, NSString *name,
         dispatch_async(dispatch_get_main_queue(), ^() {
             [self->statusBarLabel setStringValue:str];
             [self->statusBarLabel setSelectable:selectable];
+            [self->tableView.window.toolbar validateVisibleItems];
         });
         usleep(100000); // 1/10th of a sec to avoid updating statusbar as fast as possible (100% cpu on the statusbar alone is ridiculous)
     });
@@ -241,6 +254,11 @@ static void appendFormatNameIfLossyEnabled(NSUserDefaults *defs, NSString *name,
     // this creates and sets the text for textview
     [self performSelectorInBackground:@selector(loadCreditsHTML:) withObject:nil];
     [credits addObserver:self forKeyPath:@"effectiveAppearance" options:0 context:nil];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+    if (@available(macOS 26.0, *)) {
+        [self adoptLiquidGlassWindow];
+    }
+#endif
 }
 
 - (void)loadCreditsHTML:(id)_unused {
@@ -487,5 +505,293 @@ static void appendFormatNameIfLossyEnabled(NSUserDefaults *defs, NSString *name,
 
     return iconRect;
 }
+
+#pragma mark Liquid Glass
+
+// Adopting Liquid Glass: https://developer.apple.com/documentation/TechnologyOverviews/adopting-liquid-glass
+// macOS 26 moves navigation into the system toolbar and drops the legacy vibrancy plate.
+// The nib's bottom bar stays in place on older systems.
+
+- (void)adoptLiquidGlassIfNeeded {
+    [self adoptLiquidGlassMenuIcons];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+    if (@available(macOS 26.0, *)) {
+        [self adoptLiquidGlassWindow];
+    }
+#endif
+}
+
+- (void)adoptLiquidGlassMenuIcons {
+    if (!IOIsMacOS26()) {
+        return;
+    }
+    static BOOL applied = NO;
+    if (applied || [NSApp mainMenu] == nil) {
+        return;
+    }
+    if (@available(macOS 11.0, *)) {
+        NSDictionary<NSString *, NSString *> *symbols = @{
+            NSStringFromSelector(@selector(browseForFiles:)) : @"plus",
+            NSStringFromSelector(@selector(startAgain:)) : @"arrow.clockwise",
+            NSStringFromSelector(@selector(startAgainOptimized:)) : @"arrow.clockwise",
+            NSStringFromSelector(@selector(stop:)) : @"stop.circle",
+            NSStringFromSelector(@selector(revert:)) : @"arrow.uturn.backward",
+            NSStringFromSelector(@selector(quickLookAction:)) : @"eye",
+            NSStringFromSelector(@selector(openInFinder:)) : @"folder",
+            NSStringFromSelector(@selector(showPrefs:)) : @"gearshape",
+            NSStringFromSelector(@selector(clearComplete:)) : @"trash",
+            NSStringFromSelector(@selector(copyAsDataURI:)) : @"link",
+        };
+        [self applyLiquidGlassIconsInMenu:[NSApp mainMenu] symbols:symbols];
+        if (tableView.menu) {
+            [self applyLiquidGlassIconsInMenu:tableView.menu symbols:symbols];
+        }
+        applied = YES;
+    }
+}
+
+- (void)applyLiquidGlassIconsInMenu:(NSMenu *)menu symbols:(NSDictionary<NSString *, NSString *> *)symbols {
+    if (@available(macOS 11.0, *)) {
+        for (NSMenuItem *item in menu.itemArray) {
+            if (item.submenu) {
+                [self applyLiquidGlassIconsInMenu:item.submenu symbols:symbols];
+            }
+            if ([item isSeparatorItem] || item.image != nil || item.action == NULL) {
+                continue;
+            }
+            NSString *symbol = symbols[NSStringFromSelector(item.action)];
+            if (!symbol) {
+                continue;
+            }
+            NSImage *image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:item.title];
+            if (image) {
+                item.image = image;
+            }
+        }
+    }
+}
+
+- (BOOL)validateToolbarItem:(NSToolbarItem *)item {
+    if (item.action == @selector(startAgain:)) {
+        return [filesController canStartAgainOptimized:NO];
+    }
+    return YES;
+}
+
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+
+static NSString *const IOToolbarAddIdentifier = @"ImageOptim.add";
+static NSString *const IOToolbarAgainIdentifier = @"ImageOptim.again";
+static NSString *const IOToolbarSettingsIdentifier = @"ImageOptim.settings";
+
+- (void)adoptLiquidGlassWindow API_AVAILABLE(macos(26.0)) {
+    static BOOL applied = NO;
+    NSWindow *window = tableView.window;
+    if (applied || !window) {
+        return;
+    }
+
+    NSView *content = window.contentView;
+    NSScrollView *scroll = tableView.enclosingScrollView;
+    NSButton *addButton = [self buttonWithAction:@selector(browseForFiles:) inView:content];
+    NSButton *againButton = [self buttonWithAction:@selector(startAgain:) inView:content];
+    NSButton *settingsButton = [self buttonWithAction:@selector(showLossyPrefs:) inView:content];
+    NSProgressIndicator *progress = nil;
+    for (NSView *subview in content.subviews) {
+        if ([subview isKindOfClass:[NSProgressIndicator class]]) {
+            progress = (NSProgressIndicator *)subview;
+            break;
+        }
+    }
+    if (!content || !scroll || !statusBarLabel || !addButton || !againButton || !settingsButton || !progress) {
+        return;
+    }
+    applied = YES;
+
+    NSMutableSet *legacyButtons = [NSMutableSet set];
+    [legacyButtons addObject:addButton];
+    [legacyButtons addObject:againButton];
+    [legacyButtons addObject:settingsButton];
+    [self deactivateConstraintsInView:content referencingViews:legacyButtons];
+    for (NSButton *button in legacyButtons) {
+        [self retireLegacyBarButton:button];
+    }
+
+    for (NSLayoutConstraint *constraint in [content.constraints copy]) {
+        BOOL pinsScrollToBottom = (constraint.firstItem == content && constraint.firstAttribute == NSLayoutAttributeBottom &&
+                                    constraint.secondItem == scroll && constraint.secondAttribute == NSLayoutAttributeBottom);
+        BOOL pinsScrollToTop = (constraint.firstItem == scroll && constraint.firstAttribute == NSLayoutAttributeTop &&
+                                 constraint.secondItem == content && constraint.secondAttribute == NSLayoutAttributeTop);
+        if (pinsScrollToBottom) {
+            constraint.active = NO;
+        } else if (pinsScrollToTop) {
+            constraint.constant = 0;
+        }
+    }
+
+    [self clearLegacyVisualEffectInView:content];
+
+    NSViewLayoutRegion *region = [NSViewLayoutRegion safeAreaLayoutRegionWithCornerAdaptation:NSViewLayoutRegionAdaptivityAxisHorizontal];
+    NSLayoutGuide *corners = [content layoutGuideForLayoutRegion:region] ?: content.safeAreaLayoutGuide;
+    NSMutableArray<NSLayoutConstraint *> *installed = [NSMutableArray array];
+    [installed addObject:[statusBarLabel.leadingAnchor constraintEqualToAnchor:corners.leadingAnchor]];
+    [installed addObject:[statusBarLabel.bottomAnchor constraintEqualToAnchor:corners.bottomAnchor constant:-8]];
+    [installed addObject:[scroll.bottomAnchor constraintEqualToAnchor:statusBarLabel.topAnchor constant:-8]];
+    if (progress) {
+        [installed addObject:[progress.centerYAnchor constraintEqualToAnchor:statusBarLabel.centerYAnchor]];
+        [installed addObject:[progress.trailingAnchor constraintEqualToAnchor:corners.trailingAnchor]];
+        if (![self view:progress hasConstraintToView:statusBarLabel inView:content]) {
+            [installed addObject:[progress.leadingAnchor constraintGreaterThanOrEqualToAnchor:statusBarLabel.trailingAnchor constant:8]];
+        }
+    }
+    [NSLayoutConstraint activateConstraints:installed];
+
+    scroll.automaticallyAdjustsContentInsets = YES;
+    [window setContentBorderThickness:0 forEdge:NSMinYEdge];
+    window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    window.toolbarStyle = NSWindowToolbarStyleUnified;
+    window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+
+    NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"ImageOptimMain"];
+    toolbar.delegate = self;
+    toolbar.allowsUserCustomization = NO;
+    toolbar.autosavesConfiguration = NO;
+    toolbar.displayMode = NSToolbarDisplayModeIconOnly;
+    window.toolbar = toolbar;
+
+    if (window.minSize.height < 200) {
+        window.minSize = NSMakeSize(MAX(window.minSize.width, 411), 200);
+    }
+}
+
+- (NSButton *)buttonWithAction:(SEL)action inView:(NSView *)view {
+    for (NSView *subview in view.subviews) {
+        if ([subview isKindOfClass:[NSButton class]] && [(NSButton *)subview action] == action) {
+            return (NSButton *)subview;
+        }
+    }
+    return nil;
+}
+
+- (void)deactivateConstraintsInView:(NSView *)container referencingViews:(NSSet *)views {
+    if ([views count] == 0) {
+        return;
+    }
+    NSMutableArray *matched = [NSMutableArray array];
+    for (NSLayoutConstraint *constraint in container.constraints) {
+        if ([views containsObject:constraint.firstItem] || [views containsObject:constraint.secondItem]) {
+            [matched addObject:constraint];
+        }
+    }
+    [NSLayoutConstraint deactivateConstraints:matched];
+}
+
+- (BOOL)view:(NSView *)first hasConstraintToView:(NSView *)second inView:(NSView *)container {
+    for (NSLayoutConstraint *constraint in container.constraints) {
+        BOOL links = (constraint.firstItem == first && constraint.secondItem == second) ||
+                     (constraint.firstItem == second && constraint.secondItem == first);
+        if (links) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (void)retireLegacyBarButton:(NSButton *)button {
+    if ([button infoForBinding:NSEnabledBinding]) {
+        [button unbind:NSEnabledBinding];
+    }
+    if ([button infoForBinding:NSHiddenBinding]) {
+        [button unbind:NSHiddenBinding];
+    }
+    [button removeFromSuperview];
+}
+
+- (void)clearLegacyVisualEffectInView:(NSView *)view {
+    if ([view isKindOfClass:[NSVisualEffectView class]]) {
+        NSVisualEffectView *effect = (NSVisualEffectView *)view;
+        // appearanceBased / vibrant plates sit on top of the system material and hide Liquid Glass.
+        effect.appearance = nil;
+        effect.state = NSVisualEffectStateInactive;
+    }
+    for (NSView *subview in view.subviews) {
+        [self clearLegacyVisualEffectInView:subview];
+    }
+}
+
+- (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSToolbarItemIdentifier)itemIdentifier willBeInsertedIntoToolbar:(BOOL)flag {
+    (void)toolbar;
+    (void)flag;
+    if ([itemIdentifier isEqualToString:NSToolbarFlexibleSpaceItemIdentifier] ||
+        [itemIdentifier isEqualToString:NSToolbarSpaceItemIdentifier]) {
+        return [[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier];
+    }
+
+    NSString *label = nil;
+    NSString *toolTip = nil;
+    NSString *symbol = nil;
+    NSString *fallback = nil;
+    SEL action = NULL;
+    BOOL prominent = NO;
+
+    if ([itemIdentifier isEqualToString:IOToolbarAddIdentifier]) {
+        label = NSLocalizedString(@"Add", @"toolbar item");
+        toolTip = NSLocalizedString(@"Add new files or directories", @"toolbar item");
+        symbol = @"plus";
+        fallback = NSImageNameAddTemplate;
+        action = @selector(browseForFiles:);
+        prominent = YES;
+    } else if ([itemIdentifier isEqualToString:IOToolbarAgainIdentifier]) {
+        label = NSLocalizedString(@"Optimize Again", @"toolbar item");
+        toolTip = NSLocalizedString(@"Run optimizations again", @"toolbar item");
+        symbol = @"arrow.clockwise";
+        fallback = NSImageNameRefreshTemplate;
+        action = @selector(startAgain:);
+    } else if ([itemIdentifier isEqualToString:IOToolbarSettingsIdentifier]) {
+        label = NSLocalizedString(@"Settings", @"toolbar item");
+        toolTip = NSLocalizedString(@"Show settings", @"toolbar item");
+        symbol = @"gearshape";
+        fallback = NSImageNameActionTemplate;
+        action = @selector(showLossyPrefs:);
+    } else {
+        return nil;
+    }
+
+    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier];
+    item.label = label;
+    item.paletteLabel = label;
+    item.toolTip = toolTip;
+    item.accessibilityLabel = toolTip;
+    item.target = self;
+    item.action = action;
+    item.bordered = YES;
+    if (@available(macOS 26.0, *)) {
+        item.style = prominent ? NSToolbarItemStyleProminent : NSToolbarItemStylePlain;
+    }
+    NSImage *image = nil;
+    if (@available(macOS 11.0, *)) {
+        image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:toolTip];
+    }
+    if (!image) {
+        image = [NSImage imageNamed:fallback];
+    }
+    item.image = image;
+    return item;
+}
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
+    return @[
+        IOToolbarAddIdentifier,
+        NSToolbarFlexibleSpaceItemIdentifier,
+        IOToolbarAgainIdentifier,
+        IOToolbarSettingsIdentifier,
+    ];
+}
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
+    return [self toolbarDefaultItemIdentifiers:toolbar];
+}
+
+#endif
 
 @end
