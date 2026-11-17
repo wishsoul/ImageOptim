@@ -1,5 +1,6 @@
 #import "ImageOptimController.h"
 #import "FilesController.h"
+#import "ProcessorBudget.h"
 #import "RevealButtonCell.h"
 #import "Backend/Job.h"
 #import "JobProxy.h"
@@ -36,15 +37,21 @@ static const char *kIMPreviewPanelContext = "preview";
 
     NSMutableDictionary *defs = [NSMutableDictionary dictionaryWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"defaults" ofType:@"plist"]];
 
-    NSUInteger maxTasks = [[NSProcessInfo processInfo] activeProcessorCount];
+    NSUInteger processorCount = [[NSProcessInfo processInfo] activeProcessorCount];
+    BOOL lowPriority = [[NSUserDefaults standardUserDefaults] boolForKey:@"RunLowPriority"];
+    NSUInteger maxTasks = (NSUInteger)[ProcessorBudget recommendedFileConcurrencyForLowPriority:lowPriority];
+    if (maxTasks < 1) {
+        maxTasks = processorCount;
+    }
 
     defs[@"RunConcurrentFiles"] = @(maxTasks);
-    defs[@"RunConcurrentDirscans"] = @((int)ceil((double)maxTasks / 3.9));
+    defs[@"RunConcurrentDirscans"] = @((int)ceil((double)processorCount / 3.9));
 
-    // Use lighter defaults on slower machines
-    if (maxTasks <= 4) {
+    // Keep this tied to logical CPUs. Performance-core count on a base M-series
+    // Mac is 4, and that machine should not take the old "slow Mac" tool defaults.
+    if (processorCount <= 4) {
         defs[@"PngOutEnabled"] = @(NO);
-        if (maxTasks <= 2) {
+        if (processorCount <= 2) {
             defs[@"PngCrush2Enabled"] = @(NO);
         }
     }

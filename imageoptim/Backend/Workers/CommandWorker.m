@@ -8,9 +8,11 @@
 #include <unistd.h>
 #import "../Job.h"
 #import "../File.h"
+#import "../ProcessorBudget.h"
 #import "../../log.h"
 
 @implementation CommandWorker {
+    NSInteger leasedThreads;
 }
 
 - (BOOL)parseLine:(NSString *)line {
@@ -42,6 +44,16 @@
     }
 }
 
+- (NSInteger)parallelJobThreads {
+    if (leasedThreads < 1) {
+        leasedThreads = [[ProcessorBudget sharedBudget] threadsForCPUWork];
+        if (leasedThreads < 1) {
+            leasedThreads = 1;
+        }
+    }
+    return leasedThreads;
+}
+
 - (void)taskWithPath:(NSString *)path arguments:(NSArray *)arguments;
 {
     task = [NSTask new];
@@ -61,6 +73,12 @@
 
     // set up for unbuffered I/O
     environment[@"NSUnbufferedIO"] = @"YES";
+
+    NSString *threadCount = [NSString stringWithFormat:@"%ld", (long)[self parallelJobThreads]];
+    environment[@"RAYON_NUM_THREADS"] = threadCount;
+    environment[@"OMP_NUM_THREADS"] = threadCount;
+    environment[@"OMP_DYNAMIC"] = @"FALSE";
+    environment[@"OMP_WAIT_POLICY"] = @"PASSIVE";
 
     [task setEnvironment:environment];
 }

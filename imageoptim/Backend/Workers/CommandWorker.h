@@ -29,6 +29,10 @@
 
 - (BOOL)taskForKey:(NSString *)key bundleName:(NSString *)resourceName arguments:(NSArray *)args;
 
+// Threads this child process may use. Shared across concurrent files so tools
+// such as oxipng do not each start one thread per core.
+- (NSInteger)parallelJobThreads;
+
 - (BOOL)optimizeFile:(File *)file toTempPath:(NSURL *)temp;
 - (NSString *)pathForExecutableName:(NSString *)resourceName;
 
